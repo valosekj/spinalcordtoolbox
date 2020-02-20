@@ -139,6 +139,12 @@ def get_parser():
         help='Transform displacement field values from world to voxel coordinate system. Input the file that will be '
              'used as the input (source) by FSL applywarp function.',
         required=False)
+    multi.add_argument(
+        '-to-fsl',
+        metavar=Metavar.file,
+        help='Transform displacement field values to absolute FSL warps. To be used with FSL\'s applywarp function with the'
+             '`--abs` flag. Input the file that will be used as the input (source) for applywarp',
+        required=False)
 
     misc = parser.add_argument_group('Misc')
     misc.add_argument(
@@ -308,7 +314,9 @@ def main(args=None):
         # m_out[:3, :3] = np.dot(m[:3, :3], m_source[:3, :3])
         # m_out[:3, 3] = m[:3, 3] + m_source[:3, 3]
 
-
+    elif arguments.to_fsl is not None:
+        im_out = [ displacement_to_abs_fsl(Image(fname_in[0]), Image(arguments.to_fsl)) ]
+        
     else:
         im_out = None
         sct.printv(parser.error('ERROR: you need to specify an operation to do on the input image'))
@@ -345,6 +353,53 @@ def main(args=None):
     elif arguments.display_warp:
         sct.printv('Warping grid generated.', verbose, 'info')
 
+def displacement_to_abs_fsl(disp_im, src):
+    """ Convert an ITK style displacement field to an FSL compatible absolute coordinate field. 
+        this can be applied using `applywarp` from FSL using the `--abs` flag. Or converted to a
+        normal relative displacement field with `convertwarp --abs --relout`
+        args:
+          disp_im: An `Image` object representing an ITK displacement field
+          src: An `Image` object in the same space as the images you'd like to transform. Usually the fixed or
+               source image used in the registration generating the displacement field.
+    """
+    
+    def aff(x): return x.header.get_best_affine()
+  
+    def pad1_3vec(vec_arr):
+        """ Pad a 3d array of 3 vectors by 1 to make a 3d array of 4 vectors for affine transformation """
+        return np.pad(vec_arr, ((0,0),(0,0),(0,0),(0,1)), constant_values = 1)
+
+    def apply_affine(data, aff):
+        """ Transform a 3d array of 3 vectors by a 4x4 affine matrix" s.t. y = A x for each x in the array """
+        return np.dot(pad1_3vec(data), aff.T)[...,0:3]
+
+    disp = disp_im.data.squeeze(-2) # drop 5d to 4d displacement
+
+    #Generate an array of voxel coordinates for the target (note disp_im is in the same space as the target)
+    tgt_dims = disp.data.shape[0:3]
+    tgt_coords = np.mgrid[0:tgt_dims[0], 0:tgt_dims[1], 0:tgt_dims[2]].transpose((1,2,3,0))
+
+    #Convert those to world coordinates
+    tgt_coords_world = apply_affine(tgt_coords, aff(disp_im))
+
+    #Apply the displacement. TODO check if this works for all tgt orientations [works for RPI]
+    src_coords_world = tgt_coords_world + disp * [-1,-1,1]
+
+    #Convert these to voxel coordinates in the source image
+    sw2v = np.linalg.inv(aff(src))  # world to voxel matrix for the source image
+    src_coords = apply_affine(src_coords_world, sw2v)
+
+    #Convert from voxel coordinates to FSL "mm" units (not really mm)
+    #First we handle the case where the src image space has a positive determinant by inverting the x coordinate
+    if np.linalg.det(aff(src)) > 0:
+        src_coords[..., 0] = (src.data.shape[0] - 1) - src_coords[..., 0]
+
+    #Then we multiply by the voxel sizes and we're done
+    src_coords_mm = src_coords * src.header.get_zooms()
+
+    out_im = disp_im.copy()
+    out_im.data = src_coords_mm
+    return out_im
 
 def pad_image(im, pad_x_i=0, pad_x_f=0, pad_y_i=0, pad_y_f=0, pad_z_i=0, pad_z_f=0):
 
@@ -429,7 +484,6 @@ def split_data(im_in, dim, squeeze_data=True):
         im_out_list.append(im_out)
 
     return im_out_list
-
 
 def remove_vol(im_in, index_vol_user, todo):
     """
