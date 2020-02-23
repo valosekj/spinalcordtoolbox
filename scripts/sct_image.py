@@ -20,6 +20,9 @@ import numpy as np
 import spinalcordtoolbox.image as msct_image
 from spinalcordtoolbox.image import Image, concat_data
 from spinalcordtoolbox.utils import Metavar, SmartFormatter
+from nibabel                 import Nifti1Image
+from nibabel.processing      import resample_from_to
+
 
 import sct_utils as sct
 
@@ -315,7 +318,11 @@ def main(args=None):
         # m_out[:3, 3] = m[:3, 3] + m_source[:3, 3]
 
     elif arguments.to_fsl is not None:
-        im_out = [ displacement_to_abs_fsl(Image(fname_in[0]), Image(arguments.to_fsl)) ]
+        space_files = arguments.to_fsl.split(",")
+        spaces = [ Image(s) for s in space_files ]
+        if len(spaces) < 2:
+            spaces.append(None)
+        im_out = [ displacement_to_abs_fsl(Image(fname_in[0]), spaces[0], spaces[1]) ]
         
     else:
         im_out = None
@@ -353,7 +360,7 @@ def main(args=None):
     elif arguments.display_warp:
         sct.printv('Warping grid generated.', verbose, 'info')
 
-def displacement_to_abs_fsl(disp_im, src):
+def displacement_to_abs_fsl(disp_im, src, tgt = None):
     """ Convert an ITK style displacement field to an FSL compatible absolute coordinate field. 
         this can be applied using `applywarp` from FSL using the `--abs` flag. Or converted to a
         normal relative displacement field with `convertwarp --abs --relout`
@@ -373,29 +380,42 @@ def displacement_to_abs_fsl(disp_im, src):
         """ Transform a 3d array of 3 vectors by a 4x4 affine matrix" s.t. y = A x for each x in the array """
         return np.dot(pad1_3vec(data), aff.T)[...,0:3]
 
-    disp = disp_im.data.squeeze(-2) # drop 5d to 4d displacement
+    #Drop 5d to 4d displacement
+    disp_im.data = disp_im.data.squeeze(-2)
+
+    #If the target and displacement are in different spaces, resample the displacement to
+    #the target space
+    if tgt is not None:
+        hdr = disp_im.header.copy()
+        shp = disp_im.data.shape
+        hdr.set_data_shape(shp)
+        disp_nib = Nifti1Image(disp_im.data.copy(), aff(disp_im), hdr)
+        disp_resampled = resample_from_to(disp_nib, (shp, aff(tgt)))
+        disp_im.data = disp_resampled.dataobj.copy()
+        disp_im.header = disp_resampled.header.copy()
 
     #Generate an array of voxel coordinates for the target (note disp_im is in the same space as the target)
-    tgt_dims = disp.data.shape[0:3]
-    tgt_coords = np.mgrid[0:tgt_dims[0], 0:tgt_dims[1], 0:tgt_dims[2]].transpose((1,2,3,0))
+    disp_dims = disp_im.data.shape[0:3]
+    disp_coords = np.mgrid[0:disp_dims[0], 0:disp_dims[1], 0:disp_dims[2]].transpose((1,2,3,0))
 
     #Convert those to world coordinates
-    tgt_coords_world = apply_affine(tgt_coords, aff(disp_im))
+    tgt_coords_world = apply_affine(disp_coords, aff(disp_im))
 
     #Apply the displacement. TODO check if this works for all tgt orientations [works for RPI]
-    src_coords_world = tgt_coords_world + disp * [-1,-1,1]
+    src_coords_world = tgt_coords_world + disp_im.data * [-1,-1,1]
 
     #Convert these to voxel coordinates in the source image
     sw2v = np.linalg.inv(aff(src))  # world to voxel matrix for the source image
     src_coords = apply_affine(src_coords_world, sw2v)
 
     #Convert from voxel coordinates to FSL "mm" units (not really mm)
-    #First we handle the case where the src image space has a positive determinant by inverting the x coordinate
+    #First we handle the case where the src or tgt image space has a positive
+    #determinant by inverting the x coordinate
     if np.linalg.det(aff(src)) > 0:
         src_coords[..., 0] = (src.data.shape[0] - 1) - src_coords[..., 0]
 
-    #Then we multiply by the voxel sizes and we're done
-    src_coords_mm = src_coords * src.header.get_zooms()
+    # #Then we multiply by the voxel sizes and we're done
+    src_coords_mm = src_coords * src.header.get_zooms()[0:3]
 
     out_im = disp_im.copy()
     out_im.data = src_coords_mm
