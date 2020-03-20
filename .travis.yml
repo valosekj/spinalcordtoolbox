@@ -55,6 +55,9 @@ before_script:
 script:
   - |
     echo *** UNIT TESTS ***
+    sct_download_data -d applywarp
+    chmod +x applywarp-bin/applywarp
+    export PATH="$PATH:$PWD/applywarp-bin"
     pytest
 
   - |
