@@ -376,6 +376,8 @@ def displacement_to_abs_fsl(disp_im, src, tgt = None):
           disp_im: An `Image` object representing an ITK displacement field
           src: An `Image` object in the same space as the images you'd like to transform. Usually the fixed or
                source image used in the registration generating the displacement field.
+          tgt: An `Image` object, with the correct target space, for the unusual case when the deformation
+               not in the target space.
     """
     
     def aff(x): return x.header.get_best_affine()
